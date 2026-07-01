@@ -1,0 +1,243 @@
+<script setup lang="ts">
+import AdminLayout from '@/Layouts/AdminLayout.vue';
+import InvoiceForm from './Partials/InvoiceForm.vue';
+import { Head, useForm, Link, usePage } from '@inertiajs/vue3';
+import { computed } from 'vue';
+
+type CustomerOption = {
+    id: number;
+    name: string;
+    email: string;
+};
+
+type TaxOption = {
+    id: number;
+    name: string;
+    rate: string | number;
+    type: 'percentage' | 'fixed';
+};
+
+type CategoryOption = {
+    id: number;
+    name: string;
+    tax_id?: number | null;
+    tax?: TaxOption | null;
+};
+
+type ItemOption = {
+    id: number;
+    name: string;
+    description?: string | null;
+    unit: string;
+    unit_price: string | number;
+    has_discount?: boolean;
+    discount_amount?: string | number | null;
+    discount_is_percentage?: boolean;
+    tax_id?: number | null;
+    tax?: TaxOption | null;
+    category_id?: number | null;
+    category?: CategoryOption | null;
+};
+
+type InvoiceLineItem = {
+    id: number;
+    item_id: number | null;
+    name?: string | null;
+    description: string | null;
+    qty: string | number;
+    unit_price: string | number;
+    tax_id: number | null;
+};
+
+type InvoiceDetail = {
+    id: number;
+    readable_id?: string;
+    customer_id: number;
+    customer?: { id: number; name: string; email: string } | null;
+    issue_date: string;
+    due_date: string;
+    status: string;
+    notes: string | null;
+    discount: string | number;
+    balance: string | number;
+    line_items: InvoiceLineItem[];
+};
+
+type InvoicePayload = InvoiceDetail | { data: InvoiceDetail };
+
+type TaxSettings = {
+    tax_enabled: boolean;
+    tax_mode: 'none' | 'global' | 'item' | 'category' | string;
+    default_tax_id: number | null;
+};
+
+const props = defineProps<{
+    invoice: InvoicePayload;
+    customers: CustomerOption[];
+    items: { data: ItemOption[] };
+    taxes: { data: TaxOption[] };
+    tax_settings: TaxSettings;
+}>();
+
+const invoiceData = computed<InvoiceDetail>(() =>
+    'data' in props.invoice ? props.invoice.data : props.invoice,
+);
+const page = usePage();
+const isEmployee = computed(() => {
+    const rawType = (page.props as any).auth?.user?.type;
+    return rawType === 'employee' || rawType?.value === 'employee' || rawType?.name === 'employee';
+});
+const basePath = computed(() => (isEmployee.value ? '/admin/employee' : '/admin'));
+const invoicesBasePath = computed(() => `${basePath.value}/invoices`);
+const lookupsBasePath = computed(() => `${basePath.value}/lookups`);
+const invoicePrefix = computed(() => String((page.props as any).branding?.business_settings?.invoice_prefix ?? '').trim());
+const displayInvoiceId = computed(() => {
+    const base = invoiceData.value.readable_id ?? String(invoiceData.value.id).padStart(6, '0');
+    return invoicePrefix.value ? `${invoicePrefix.value}${base}` : base;
+});
+
+const customerSearchUrl = computed(() => `${lookupsBasePath.value}/customers`);
+const itemSearchUrl = computed(() => `${lookupsBasePath.value}/items`);
+const selectedCustomerLabel = invoiceData.value.customer
+    ? `${invoiceData.value.customer.name} (${invoiceData.value.customer.email})`
+    : '';
+
+const toDateInput = (value: string) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toISOString().slice(0, 10);
+};
+
+const normalizeQty = (value: string | number | null | undefined) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return '1';
+    }
+    return String(Math.max(1, Math.trunc(parsed)));
+};
+
+const form = useForm({
+    customer_mode: 'existing',
+    customer_id: invoiceData.value.customer_id,
+    customer_name: '',
+    customer_email: '',
+    issue_date: toDateInput(invoiceData.value.issue_date),
+    due_date: toDateInput(invoiceData.value.due_date),
+    status: invoiceData.value.status,
+    notes: invoiceData.value.notes ?? '',
+    discount: String(invoiceData.value.discount ?? ''),
+    line_items: (invoiceData.value.line_items ?? []).map((line) => ({
+        item_id: line.item_id ?? null,
+        name: line.name ?? '',
+        description: line.description ?? '',
+        discount_label: '',
+        has_discount: false,
+        discount_amount: null,
+        discount_is_percentage: false,
+        qty: normalizeQty(line.qty),
+        unit_price: String(line.unit_price ?? ''),
+        tax_id: line.tax_id,
+    })),
+});
+
+const validateForm = () => {
+    form.clearErrors();
+    let isValid = true;
+
+    if (!form.customer_id) {
+        form.setError('customer_id', 'Customer is required.');
+        isValid = false;
+    }
+
+    if (!form.issue_date) {
+        form.setError('issue_date', 'Issue date is required.');
+        isValid = false;
+    }
+
+    if (!form.due_date) {
+        form.setError('due_date', 'Due date is required.');
+        isValid = false;
+    }
+
+    if (!form.line_items.length) {
+        form.setError('line_items', 'At least one line item is required.');
+        isValid = false;
+    }
+
+    form.line_items.forEach((line, index) => {
+        const hasItem = Boolean(line.item_id);
+        const hasName = Boolean(line.name && String(line.name).trim());
+        if (!hasItem && !hasName) {
+            form.setError(`line_items.${index}.item_id`, 'Item or name is required.');
+            form.setError(`line_items.${index}.name`, 'Item or name is required.');
+            isValid = false;
+        }
+
+        const qtyValue = Number(line.qty);
+        if (line.qty === '' || Number.isNaN(qtyValue) || !Number.isInteger(qtyValue)) {
+            form.setError(`line_items.${index}.qty`, 'Quantity must be a whole number.');
+            isValid = false;
+        } else if (qtyValue < 1) {
+            form.setError(`line_items.${index}.qty`, 'Quantity must be at least 1.');
+            isValid = false;
+        }
+
+        const unitPriceValue = Number(line.unit_price);
+        if (line.unit_price === '' || Number.isNaN(unitPriceValue) || unitPriceValue < 0) {
+            form.setError(`line_items.${index}.unit_price`, 'Unit price must be zero or higher.');
+            isValid = false;
+        }
+    });
+
+    return isValid;
+};
+
+const submit = () => {
+    if (!validateForm()) return;
+
+    form.put(`${invoicesBasePath.value}/${invoiceData.value.id}`, {
+        preserveScroll: true,
+    });
+};
+</script>
+
+<template>
+    <Head title="Edit Invoice" />
+
+    <AdminLayout>
+        <div class="max-w-5xl mx-auto space-y-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="text-sm text-slate-500">
+                        <Link :href="invoicesBasePath" class="hover:text-brand-600">{{ __('Invoices') }}</Link>
+                        <span class="mx-2">/</span>
+                        <Link :href="`${invoicesBasePath}/${invoiceData.id}`" class="hover:text-brand-600">
+                            {{ __('Invoice #') }}{{ displayInvoiceId }}
+                        </Link>
+                        <span class="mx-2">/</span>
+                        <span class="text-slate-700">{{ __('Edit') }}</span>
+                    </div>
+                    <h1 class="text-xl font-extrabold text-slate-900">{{ __('Edit Invoice') }}</h1>
+                    <p class="text-sm text-slate-500">{{ __('Update invoice details and line items.') }}</p>
+                </div>
+            </div>
+
+            <InvoiceForm
+                :form="form"
+                :customers="customers"
+                :items="items"
+                :taxes="taxes"
+                :tax-settings="tax_settings"
+                :customer-search-url="customerSearchUrl"
+                :item-search-url="itemSearchUrl"
+                :selected-customer-label="selectedCustomerLabel"
+                :balance="invoiceData.balance"
+                :allow-customer-create="false"
+                :submit-label="__('Save Changes')"
+                :processing-label="__('Saving...')"
+                @submit="submit"
+            />
+        </div>
+    </AdminLayout>
+</template>
